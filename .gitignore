@@ -21,56 +21,90 @@ wheels/
 *.egg
 MANIFEST
 
-# Jupyter Notebook
-.ipynb_checkpoints
+# Virtual environments
+venv/
+venv_py311/
+env/
+ENV/
+env.bak/
+venv.bak/
 
-# PyCharm
-.idea/
-
-# VS Code
+# IDE
 .vscode/
-
-# macOS
-.DS_Store
-.AppleDouble
-.LSOverride
-
-# Windows
-Thumbs.db
-ehthumbs.db
-Desktop.ini
-
-# Linux
+.idea/
+*.swp
+*.swo
 *~
 
-# Data files (large files)
-*.feather
-*.csv
-*.parquet
-*.h5
-*.hdf5
-
-# Model files (large files)
-*.pth
-*.pt
-*.ckpt
-*.bin
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
 
 # Logs
 *.log
 logs/
+cache/
 
-# Environment
-.env
-.venv
-env/
-venv/
-ENV/
-env.bak/
-venv.bak/
+# Data files
+data/
+*.csv
+*.json
+*.xlsx
+*.db
+*.sqlite
+
+# Model files (use Git LFS instead)
+# *.bin
+# *.safetensors
+# *.pth
+# *.pt
+# *.h5
+# *.pkl
+# *.model
+
+# Large files
+*.pdf
+*.zip
+*.tar.gz
+*.rar
 
 # Temporary files
 *.tmp
 *.temp
 temp/
 tmp/
+
+# Build artifacts
+build/
+dist/
+*.exe
+*.app
+*.dmg
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# pytest
+.pytest_cache/
+
+# Coverage reports
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre type checker
+.pyre/
+
+# Ruff
+.ruff_cache/
