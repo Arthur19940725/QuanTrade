@@ -1,0 +1,21 @@
+# 更新后的依赖文件 - 兼容Python 3.13
+# 核心依赖
+numpy>=1.26.0
+pandas>=2.3.0  # 支持Python 3.13
+torch>=2.8.0   # 支持Python 3.13
+einops>=0.8.0
+huggingface_hub>=0.33.0
+matplotlib>=3.9.0  # 支持Python 3.13
+
+# Web界面依赖
+flask>=3.0.0
+flask-cors>=6.0.0
+plotly>=6.0.0
+
+# 可选依赖（微调时使用）
+# pyqlib  # 需要单独安装
+# comet-ml  # 可选，用于实验跟踪
+
+# 开发依赖
+tqdm>=4.42.0
+requests>=2.25.0 
