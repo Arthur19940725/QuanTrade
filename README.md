@@ -160,6 +160,7 @@ QuantPredictPro/
 MIT License
 
 ## 📞 联系方式
+Email: 1945673686@qq.com
 
 如有问题，请提交Issue或联系开发者。
 
