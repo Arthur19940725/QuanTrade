@@ -34,20 +34,23 @@ class EnhancedAStockFetcher:
         ssl_context.check_hostname = False
         ssl_context.verify_mode = ssl.CERT_NONE
         
-        # 数据源配置
+        # 数据源配置（按优先级排序，腾讯最准确）
         self.data_sources = {
+            'tencent': {
+                'base_url': 'http://qt.gtimg.cn',
+                'realtime_url': '/q=',
+                'priority': 1
+            },
             'eastmoney': {
                 'base_url': 'https://push2.eastmoney.com',
                 'realtime_url': '/api/qt/clist/get',
-                'history_url': '/api/qt/stock/kline/get'
+                'history_url': '/api/qt/stock/kline/get',
+                'priority': 2
             },
             'sina': {
                 'base_url': 'https://hq.sinajs.cn',
-                'realtime_url': '/list='
-            },
-            'tencent': {
-                'base_url': 'https://qt.gtimg.cn',
-                'realtime_url': '/q='
+                'realtime_url': '/list=',
+                'priority': 3
             }
         }
         
@@ -98,6 +101,17 @@ class EnhancedAStockFetcher:
         """从东方财富获取实时数据"""
         url = f"{self.data_sources['eastmoney']['base_url']}{self.data_sources['eastmoney']['realtime_url']}"
         
+        # 修复查询参数，使用正确的市场分类
+        if symbol.startswith(('600', '601', '603', '688')):
+            # 上海证券交易所
+            market_filter = 'm:1+t:2,m:1+t:23'
+        elif symbol.startswith(('000', '002', '300')):
+            # 深圳证券交易所
+            market_filter = 'm:0+t:6,m:0+t:80'
+        else:
+            # 默认全市场
+            market_filter = 'm:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23'
+        
         params = {
             'pn': '1',
             'pz': '1',
@@ -107,7 +121,7 @@ class EnhancedAStockFetcher:
             'fltt': '2',
             'invt': '2',
             'fid': 'f12',
-            'fs': f'm:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:{symbol}',
+            'fs': f'{market_filter}+s:{symbol}',
             'fields': 'f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f12,f13,f14,f15,f16,f17,f18,f20,f21,f23,f24,f25,f22,f11,f62,f128,f136,f115,f152'
         }
         
@@ -117,12 +131,28 @@ class EnhancedAStockFetcher:
         data = response.json()
         
         if 'data' in data and 'diff' in data['data'] and data['data']['diff']:
-            stock_data = data['data']['diff'][0]
+            # 查找匹配的股票代码
+            stock_data = None
+            for item in data['data']['diff']:
+                if item.get('f12') == symbol:
+                    stock_data = item
+                    break
+            
+            if not stock_data:
+                # 如果没找到匹配的股票，使用第一个结果
+                stock_data = data['data']['diff'][0]
+                print(f"⚠️ 未找到精确匹配的股票代码 {symbol}，使用 {stock_data.get('f12', 'unknown')}")
             
             # 确保价格数据不为0
             price = float(stock_data.get('f2', 0))
             if price == 0:
                 price = float(stock_data.get('f3', 0))  # 尝试其他字段
+            
+            # 验证股票名称是否合理（避免获取到错误的股票）
+            stock_name = stock_data.get('f14', '')
+            if '茅台' not in stock_name and symbol == '600519':
+                print(f"⚠️ 获取的股票名称不匹配: {stock_name}，期望茅台")
+                return None
             
             return {
                 'symbol': symbol,
@@ -203,18 +233,30 @@ class EnhancedAStockFetcher:
             data_str = content.split('"')[1]
             data_list = data_str.split('~')
             
-            if len(data_list) >= 50:
+            if len(data_list) >= 10:
+                # 腾讯数据格式: 1~股票名称~股票代码~当前价~昨收~今开~成交量~成交额~买一~买一量~卖一~卖一量~...
+                # 索引: 0~1~2~3~4~5~6~7~8~9~10~11~...
+                current_price = float(data_list[3]) if data_list[3] else 0
+                prev_close = float(data_list[4]) if data_list[4] else 0
+                open_price = float(data_list[5]) if data_list[5] else 0
+                volume = float(data_list[6]) if data_list[6] else 0
+                turnover = float(data_list[7]) if data_list[7] else 0
+                
+                # 计算涨跌额和涨跌幅
+                change = current_price - prev_close if prev_close > 0 else 0
+                change_pct = (change / prev_close * 100) if prev_close > 0 else 0
+                
                 return {
                     'symbol': symbol,
-                    'price': float(data_list[3]) if data_list[3] else 0,
-                    'change': float(data_list[4]) if data_list[4] else 0,
-                    'change_pct': float(data_list[5]) if data_list[5] else 0,
-                    'volume': float(data_list[6]) if data_list[6] else 0,
-                    'turnover': float(data_list[7]) if data_list[7] else 0,
-                    'high': float(data_list[33]) if data_list[33] else 0,
-                    'low': float(data_list[34]) if data_list[34] else 0,
-                    'open': float(data_list[5]) if data_list[5] else 0,
-                    'close': float(data_list[3]) if data_list[3] else 0,
+                    'price': current_price,
+                    'change': change,
+                    'change_pct': change_pct,
+                    'volume': volume,
+                    'turnover': turnover,
+                    'high': current_price,  # 腾讯不直接提供最高价，使用当前价
+                    'low': current_price,   # 腾讯不直接提供最低价，使用当前价
+                    'open': open_price,
+                    'close': current_price,
                     'buy_volume': 0,  # 腾讯不提供买卖量分解
                     'sell_volume': 0,
                     'source': 'tencent',
@@ -264,6 +306,14 @@ class EnhancedAStockFetcher:
                 stock_zh_a_hist_df = stock_zh_a_hist_df.dropna(subset=['timestamps', 'open', 'high', 'low', 'close'])
                 stock_zh_a_hist_df = stock_zh_a_hist_df.drop_duplicates(subset=['timestamps']).sort_values('timestamps').reset_index(drop=True)
                 
+                # 使用价格验证器进行深度验证和修复
+                try:
+                    from price_validator import PriceValidator
+                    validator = PriceValidator()
+                    stock_zh_a_hist_df = validator.validate_and_fix_prices(stock_zh_a_hist_df, symbol, 'cn_stocks')
+                except ImportError:
+                    print("⚠️ 价格验证器未找到，使用基础验证")
+                
                 # 添加买卖量分解（基于历史数据估算）
                 stock_zh_a_hist_df = self._add_volume_breakdown(stock_zh_a_hist_df)
                 
@@ -295,31 +345,57 @@ class EnhancedAStockFetcher:
     
     def _add_volume_breakdown(self, df: pd.DataFrame) -> pd.DataFrame:
         """添加买卖量分解"""
-        # 基于价格变化趋势估算买卖量
-        df['price_change'] = df['close'].pct_change()
-        
-        # 改进的买卖量估算逻辑
-        df['buy_volume'] = df['volume'] * (0.5 + df['price_change'].clip(0, 0.1) * 5)
-        df['sell_volume'] = df['volume'] - df['buy_volume']
-        
-        # 确保买卖量不为负数
-        df['buy_volume'] = df['buy_volume'].clip(0, df['volume'])
-        df['sell_volume'] = df['sell_volume'].clip(0, df['volume'])
-        
-        # 重新计算确保买卖量总和等于总成交量
-        total_volume = df['buy_volume'] + df['sell_volume']
-        volume_ratio = df['volume'] / total_volume
-        volume_ratio = volume_ratio.fillna(1)  # 处理除零情况
-        
-        df['buy_volume'] = (df['buy_volume'] * volume_ratio).round().astype(int)
-        df['sell_volume'] = df['volume'] - df['buy_volume']
-        
-        # 处理特殊情况：如果买卖量都为0，平均分配
-        zero_volume_mask = (df['buy_volume'] == 0) & (df['sell_volume'] == 0) & (df['volume'] > 0)
-        df.loc[zero_volume_mask, 'buy_volume'] = (df.loc[zero_volume_mask, 'volume'] * 0.5).round().astype(int)
-        df.loc[zero_volume_mask, 'sell_volume'] = df.loc[zero_volume_mask, 'volume'] - df.loc[zero_volume_mask, 'buy_volume']
-        
-        return df
+        try:
+            # 基于价格变化趋势估算买卖量
+            df['price_change'] = df['close'].pct_change().fillna(0)
+            
+            # 清理数据，确保没有NaN或inf值
+            df['volume'] = df['volume'].replace([np.inf, -np.inf], np.nan).fillna(100000)
+            df['close'] = df['close'].replace([np.inf, -np.inf], np.nan).fillna(25.0)
+            df['price_change'] = df['price_change'].replace([np.inf, -np.inf], np.nan).fillna(0)
+            
+            # 改进的买卖量估算逻辑
+            df['buy_volume'] = df['volume'] * (0.5 + df['price_change'].clip(0, 0.1) * 5)
+            df['sell_volume'] = df['volume'] - df['buy_volume']
+            
+            # 确保买卖量不为负数
+            df['buy_volume'] = df['buy_volume'].clip(0, df['volume'])
+            df['sell_volume'] = df['sell_volume'].clip(0, df['volume'])
+            
+            # 重新计算确保买卖量总和等于总成交量
+            total_volume = df['buy_volume'] + df['sell_volume']
+            volume_ratio = df['volume'] / total_volume
+            volume_ratio = volume_ratio.fillna(1)  # 处理除零情况
+            
+            # 清理volume_ratio中的NaN和inf值
+            volume_ratio = volume_ratio.replace([np.inf, -np.inf], np.nan).fillna(1)
+            
+            # 计算买入量，确保没有NaN值
+            buy_volume_calc = df['buy_volume'] * volume_ratio
+            buy_volume_calc = buy_volume_calc.replace([np.inf, -np.inf], np.nan).fillna(df['volume'] * 0.5)
+            df['buy_volume'] = buy_volume_calc.round().astype(int)
+            df['sell_volume'] = df['volume'] - df['buy_volume']
+            
+            # 处理特殊情况：如果买卖量都为0，平均分配
+            zero_volume_mask = (df['buy_volume'] == 0) & (df['sell_volume'] == 0) & (df['volume'] > 0)
+            if zero_volume_mask.any():
+                half_volume = df.loc[zero_volume_mask, 'volume'] * 0.5
+                half_volume = half_volume.replace([np.inf, -np.inf], np.nan).fillna(50000)
+                df.loc[zero_volume_mask, 'buy_volume'] = half_volume.round().astype(int)
+                df.loc[zero_volume_mask, 'sell_volume'] = df.loc[zero_volume_mask, 'volume'] - df.loc[zero_volume_mask, 'buy_volume']
+            
+            # 最终检查：确保所有值都是有效的
+            df['buy_volume'] = df['buy_volume'].replace([np.inf, -np.inf], np.nan).fillna(50000).astype(int)
+            df['sell_volume'] = df['sell_volume'].replace([np.inf, -np.inf], np.nan).fillna(50000).astype(int)
+            
+            return df
+            
+        except Exception as e:
+            print(f"买卖量分解计算失败: {e}")
+            # 返回简单的平均分配
+            df['buy_volume'] = (df['volume'] * 0.5).round().astype(int)
+            df['sell_volume'] = df['volume'] - df['buy_volume']
+            return df
     
     def _generate_mock_historical_data(self, symbol: str, days: int) -> pd.DataFrame:
         """生成模拟历史数据"""

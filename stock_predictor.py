@@ -202,6 +202,15 @@ class MultiMarketDataFetcher:
                 df[col] = pd.to_numeric(df[col], errors='coerce')
             df = df.dropna(subset=['timestamps', 'open', 'high', 'low', 'close']).drop_duplicates(subset=['timestamps'])
             df = df[['timestamps', 'open', 'high', 'low', 'close', 'volume']].sort_values('timestamps').reset_index(drop=True)
+            
+            # 使用价格验证器进行深度验证和修复
+            try:
+                from price_validator import PriceValidator
+                validator = PriceValidator()
+                df = validator.validate_and_fix_prices(df, symbol, 'crypto')
+            except ImportError:
+                print("⚠️ 价格验证器未找到，使用基础验证")
+            
             return df
             
         except Exception as e:

@@ -11,7 +11,7 @@ Write-Host "检测到Python版本: $pythonVersion" -ForegroundColor Yellow
 Write-Host "检查pip..." -ForegroundColor Blue
 pip --version
 
-# 安装核心依赖
+# 安装核心依赖·
 Write-Host "📦 安装核心依赖..." -ForegroundColor Green
 
 # 安装PyTorch (CPU版本，兼容Python 3.13)

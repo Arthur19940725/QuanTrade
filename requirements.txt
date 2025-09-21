@@ -15,8 +15,9 @@ datasets>=2.0.0
 
 # 金融数据
 akshare>=1.9.0
-yfinance>=0.1.70
+yfinance>=0.2.40
 ccxt>=2.0.0
+tushare>=1.2.89
 
 # GUI界面
 tkinter-tooltip>=2.0.0

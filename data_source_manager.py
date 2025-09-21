@@ -135,6 +135,241 @@ class EnhancedDataSourceManager:
         
         return df
     
+    def get_real_time_price(self, symbol: str, market: str) -> Dict:
+        """获取实时价格（支持OpenBB）"""
+        cache_key = f"realtime_{symbol}_{market}"
+        
+        # 检查缓存
+        if self._is_cache_valid(cache_key):
+            return self.cache[cache_key]['data']
+        
+        # 根据市场类型选择数据源
+        if market == 'cn_stocks':
+            # A股优先使用增强型数据获取器（腾讯数据源更准确）
+            try:
+                from enhanced_a_stock_fetcher import EnhancedAStockFetcher
+                
+                fetcher = EnhancedAStockFetcher()
+                data = fetcher.get_real_time_price(symbol)
+                
+                if data and data.get('price', 0) > 0:
+                    self.cache[cache_key] = {
+                        'data': data,
+                        'timestamp': time.time()
+                    }
+                    return data
+                    
+            except ImportError:
+                print("⚠️ 增强型A股数据获取器未找到，尝试OpenBB")
+            except Exception as e:
+                print(f"⚠️ 增强型A股实时价格获取失败: {e}")
+            
+            # 备用：使用OpenBB A股数据获取器
+            try:
+                from openbb_a_stock_fetcher import OpenBBAStockFetcher
+                
+                fetcher = OpenBBAStockFetcher()
+                data = fetcher.get_real_time_price(symbol)
+                
+                if data and data.get('price', 0) > 0:
+                    # 更新缓存
+                    self.cache[cache_key] = {
+                        'data': data,
+                        'timestamp': time.time()
+                    }
+                    return data
+                    
+            except ImportError:
+                print("⚠️ OpenBB A股数据获取器未找到")
+            except Exception as e:
+                print(f"⚠️ OpenBB A股实时价格获取失败: {e}")
+        
+        elif market == 'us_stocks':
+            # 美股使用Finnhub
+            try:
+                data = self._get_finnhub_real_time_price(symbol)
+                if data and isinstance(data, dict) and data.get('price', 0) > 0:
+                    self.cache[cache_key] = {
+                        'data': data,
+                        'timestamp': time.time()
+                    }
+                    return data
+            except Exception as e:
+                print(f"⚠️ 美股实时价格获取失败: {e}")
+        elif market == 'crypto':
+            # 加密货币：优先Binance，增加健壮校验与二次校准
+            try:
+                data = self._get_crypto_realtime_with_validation(symbol)
+                if data and data.get('price', 0) > 0:
+                    self.cache[cache_key] = {
+                        'data': data,
+                        'timestamp': time.time()
+                    }
+                    return data
+            except Exception as e:
+                print(f"⚠️ 加密货币实时价格获取失败: {e}")
+        
+        # 返回模拟数据
+        mock_data = self._get_mock_price_data(symbol, market)
+        self.cache[cache_key] = {
+            'data': mock_data,
+            'timestamp': time.time()
+        }
+        return mock_data
+    
+    def _get_finnhub_real_time_price(self, symbol: str) -> Dict:
+        """获取Finnhub实时价格"""
+        try:
+            url = f"{self.data_sources['us_stocks']['finnhub']['url']}/quote"
+            params = {
+                'symbol': symbol,
+                'token': self.data_sources['us_stocks']['finnhub']['api_key']
+            }
+            
+            response = self._make_request_with_retry(url, params)
+            data = response.json()
+            
+            if 'c' in data and data['c'] is not None:
+                return {
+                    'symbol': symbol,
+                    'price': float(data['c']),
+                    'change': float(data.get('d', 0)),
+                    'change_pct': float(data.get('dp', 0)),
+                    'volume': float(data.get('v', 0)),
+                    'turnover': float(data['c']) * float(data.get('v', 0)),
+                    'high': float(data.get('h', 0)),
+                    'low': float(data.get('l', 0)),
+                    'open': float(data.get('o', 0)),
+                    'close': float(data['c']),
+                    'buy_volume': 0,
+                    'sell_volume': 0,
+                    'source': 'finnhub',
+                    'timestamp': datetime.now().isoformat()
+                }
+        except Exception as e:
+            print(f"⚠️ Finnhub API调用失败: {e}")
+        
+        return None
+
+    def _get_crypto_realtime_with_validation(self, symbol: str) -> Dict:
+        """获取加密货币实时价格并校准（修复价格不准问题，如ETH=4000却返回3000）"""
+        # 标准主交易对
+        primary_pair = f"{symbol.upper()}USDT"
+        backup_pairs = [f"{symbol.upper()}BUSD", f"{symbol.upper()}USDC"]
+
+        def fetch_price_from_binance(pair: str) -> Optional[float]:
+            url = f"{self.data_sources['crypto']['binance']['url']}/ticker/price"
+            resp = self._make_request_with_retry(url, params={'symbol': pair})
+            data = resp.json()
+            return float(data.get('price')) if 'price' in data else None
+
+        prices: List[float] = []
+        # 1) 主交易对
+        try:
+            p = fetch_price_from_binance(primary_pair)
+            if p:
+                prices.append(p)
+        except Exception:
+            pass
+        # 2) 备用交易对
+        for pair in backup_pairs:
+            try:
+                p = fetch_price_from_binance(pair)
+                if p:
+                    prices.append(p)
+            except Exception:
+                continue
+
+        # 3) 如果仍然不足，尝试24hr ticker获取加权均价
+        if not prices:
+            try:
+                url = f"{self.data_sources['crypto']['binance']['url']}/ticker/24hr"
+                resp = self._make_request_with_retry(url, params={'symbol': primary_pair})
+                data = resp.json()
+                if 'weightedAvgPrice' in data:
+                    prices.append(float(data['weightedAvgPrice']))
+            except Exception:
+                pass
+
+        # 4) 基于统计中值与离群值过滤校准
+        if not prices:
+            return None
+
+        arr = np.array(prices, dtype=float)
+        median_price = float(np.median(arr))
+        # IQR去极值
+        q1, q3 = np.percentile(arr, [25, 75])
+        iqr = max(q3 - q1, 1e-9)
+        lower, upper = q1 - 1.5 * iqr, q3 + 1.5 * iqr
+        arr_clipped = arr[(arr >= lower) & (arr <= upper)]
+        final_price = float(np.median(arr_clipped)) if arr_clipped.size > 0 else median_price
+
+        return {
+            'symbol': symbol.upper(),
+            'price': final_price,
+            'change': 0.0,
+            'change_pct': 0.0,
+            'volume': 0.0,
+            'turnover': 0.0,
+            'high': 0.0,
+            'low': 0.0,
+            'open': 0.0,
+            'close': final_price,
+            'buy_volume': 0.0,
+            'sell_volume': 0.0,
+            'source': 'binance_validated',
+            'timestamp': datetime.now().isoformat()
+        }
+
+    # 批量接口：每市场最多返回500个标的的实时价格
+    def get_real_time_prices_batch(self, symbols: List[str], market: str, limit: int = 500) -> List[Dict]:
+        """批量获取实时价格，最多500。
+        返回列表中每项与 get_real_time_price 的结构一致。
+        """
+        if not symbols:
+            return []
+        symbols = symbols[: min(limit, 500)]
+        results: List[Dict] = []
+        for s in symbols:
+            try:
+                data = self.get_real_time_price(s, market)
+                if isinstance(data, dict):
+                    results.append(data)
+            except Exception:
+                continue
+        return results
+    
+    def _get_mock_price_data(self, symbol: str, market: str) -> Dict:
+        """获取模拟价格数据"""
+        base_prices = {
+            'cn_stocks': {'600519': 1600, '000858': 180, '000001': 12, '000002': 18, 'default': 25},
+            'us_stocks': {'AAPL': 150, 'MSFT': 300, 'GOOGL': 100, 'TSLA': 200, 'default': 50},
+            'crypto': {'BTCUSDT': 50000, 'ETHUSDT': 3000, 'default': 1000}
+        }
+        
+        market_prices = base_prices.get(market, base_prices['cn_stocks'])
+        base_price = market_prices.get(symbol, market_prices['default'])
+        
+        change = np.random.normal(0, 0.01)
+        current_price = base_price * (1 + change)
+        
+        return {
+            'symbol': symbol,
+            'price': current_price,
+            'change': current_price - base_price,
+            'change_pct': change * 100,
+            'volume': np.random.uniform(10000, 100000),
+            'turnover': current_price * np.random.uniform(10000, 100000),
+            'high': current_price * 1.02,
+            'low': current_price * 0.98,
+            'open': current_price * (1 + np.random.normal(0, 0.005)),
+            'close': current_price,
+            'buy_volume': np.random.uniform(5000, 50000),
+            'sell_volume': np.random.uniform(5000, 50000),
+            'source': 'mock',
+            'timestamp': datetime.now().isoformat()
+        }
+    
     def _fetch_crypto_with_fallback(self, symbol: str, days: int) -> pd.DataFrame:
         """加密货币数据获取（多源fallback）"""
         # 尝试Binance API
@@ -185,9 +420,29 @@ class EnhancedDataSourceManager:
         return self._generate_realistic_mock_data(symbol, days, 'hk_stock')
     
     def _fetch_cn_stock_with_fallback(self, symbol: str, days: int) -> pd.DataFrame:
-        """A股数据获取"""
+        """A股数据获取（多源fallback，移除OpenBB）"""
+        # 1. 优先使用 TuShare/yfinance 抓取器
         try:
-            # 使用增强型A股数据获取器
+            from cn_stock_fetcher import CNStockFetcher
+
+            fetcher = CNStockFetcher()
+            df = fetcher.get_historical(symbol, days)
+
+            if not df.empty:
+                if 'buy_volume' not in df.columns or 'sell_volume' not in df.columns:
+                    df = self._add_volume_breakdown(df)
+                print(f"✅ 成功获取A股 {symbol} 历史数据 (TuShare/yfinance): {len(df)} 条记录")
+                return df[['timestamps', 'open', 'high', 'low', 'close', 'volume', 'buy_volume', 'sell_volume']]
+            else:
+                print(f"⚠️ TuShare/yfinance A股 {symbol} 历史数据为空，尝试备用源")
+
+        except ImportError:
+            print("⚠️ 未找到 CNStockFetcher，尝试增强型获取器")
+        except Exception as e:
+            print(f"⚠️ TuShare/yfinance A股数据获取异常: {e}")
+
+        # 2. 使用增强型A股数据获取器
+        try:
             from enhanced_a_stock_fetcher import EnhancedAStockFetcher
             
             fetcher = EnhancedAStockFetcher()
@@ -198,17 +453,21 @@ class EnhancedDataSourceManager:
                 if 'buy_volume' not in df.columns or 'sell_volume' not in df.columns:
                     df = self._add_volume_breakdown(df)
                 
-                print(f"✅ 成功获取A股 {symbol} 历史数据: {len(df)} 条记录")
+                print(f"✅ 成功获取A股 {symbol} 历史数据 (增强型): {len(df)} 条记录")
                 return df[['timestamps', 'open', 'high', 'low', 'close', 'volume', 'buy_volume', 'sell_volume']]
             else:
-                print(f"⚠️ A股 {symbol} 历史数据为空，使用模拟数据")
-                return self._generate_realistic_mock_data(symbol, days, 'cn_stock')
+                print(f"⚠️ 增强型A股 {symbol} 历史数据为空，使用akshare")
                 
         except ImportError:
             print("⚠️ 增强型A股数据获取器未找到，使用akshare")
+        except Exception as e:
+            print(f"⚠️ 增强型A股数据获取异常: {e}")
+        
+        # 3. 使用akshare作为最后备用
+        try:
             return self._fetch_cn_stock_with_akshare(symbol, days)
         except Exception as e:
-            print(f"⚠️ A股数据获取异常: {e}")
+            print(f"⚠️ akshare A股数据获取异常: {e}")
             return self._generate_realistic_mock_data(symbol, days, 'cn_stock')
     
     def _fetch_cn_stock_with_akshare(self, symbol: str, days: int) -> pd.DataFrame:
@@ -526,6 +785,14 @@ class EnhancedDataSourceManager:
         # 按时间排序
         df = df.sort_values('timestamps').reset_index(drop=True)
         
+        # 使用价格验证器进行深度验证和修复
+        try:
+            from price_validator import PriceValidator
+            validator = PriceValidator()
+            df = validator.validate_and_fix_prices(df, symbol, self._get_market_type(symbol))
+        except ImportError:
+            print("⚠️ 价格验证器未找到，使用基础验证")
+        
         # 检查数据新鲜度
         latest_time = df['timestamps'].iloc[-1]
         now = pd.Timestamp.now()
@@ -540,6 +807,19 @@ class EnhancedDataSourceManager:
             print(f"✅ 数据新鲜度良好: {symbol}, 最新数据时间: {latest_time}")
         
         return df
+    
+    def _get_market_type(self, symbol: str) -> str:
+        """根据symbol推断市场类型"""
+        # 这里可以根据symbol的特征来判断市场类型
+        # 实际使用时应该从调用方传入market参数
+        if symbol in ['BTC', 'ETH', 'BNB', 'XRP', 'ADA', 'DOGE', 'SOL']:
+            return 'crypto'
+        elif symbol.startswith(('0', '3', '6')):
+            return 'cn_stocks'
+        elif symbol.startswith('0') and len(symbol) == 4:
+            return 'hk_stocks'
+        else:
+            return 'us_stocks'
     
     def _generate_realistic_mock_data(self, symbol: str, days: int, market_type: str) -> pd.DataFrame:
         """生成更真实的模拟数据"""
@@ -638,36 +918,16 @@ class EnhancedDataSourceManager:
         cache_time = self.cache[cache_key]['timestamp']
         return (time.time() - cache_time) < self.cache_duration
     
-    def get_real_time_price(self, symbol: str, market: str) -> float:
-        """获取实时价格（单独接口）"""
+    def get_real_time_price_simple(self, symbol: str, market: str) -> float:
+        """获取实时价格（简化接口，仅返回价格数值）"""
         try:
-            if market == 'crypto':
-                url = f"{self.data_sources['crypto']['binance']['url']}/ticker/price"
-                params = {'symbol': f"{symbol}USDT"}
-                response = self._make_request_with_retry(url, params)
-                data = response.json()
-                return float(data['price'])
-            elif market == 'us_stocks':
-                # 优先使用Finnhub实时价格API（最准确的实时数据）
-                try:
-                    return self._get_finnhub_real_time_price(symbol)
-                except Exception as e:
-                    print(f"⚠️ Finnhub实时价格失败，回退到历史数据: {e}")
-                    # 回退到最新收盘价
-                    try:
-                        df = self.get_latest_data(symbol, market, days=1)
-                        return float(df['close'].iloc[-1])
-                    except Exception as e2:
-                        print(f"⚠️ 获取历史数据也失败: {e2}")
-                        return None
-            else:
-                # 对于其他市场，返回最新收盘价
-                df = self.get_latest_data(symbol, market, days=1)
-                return float(df['close'].iloc[-1])
-                
+            data = self.get_real_time_price(symbol, market)
+            if isinstance(data, dict):
+                return data.get('price', 0.0)
+            return 0.0
         except Exception as e:
             print(f"⚠️ 获取实时价格失败: {symbol}, {e}")
-            return None
+            return 0.0
     
     def _get_finnhub_real_time_price(self, symbol: str) -> float:
         """获取Finnhub实时价格"""
